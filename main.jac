@@ -1,115 +1,169 @@
-import from byllm.llm { Model }
+import from typing { Any }
+import from datetime { datetime }
 
-glob llm = Model(model_name="claude-sonnet-4-6");
-
-node Todo {
+node Memo {
     has title: str,
-        done: bool = False,
-        feedback: str = "";
+        audio_data: str,
+        created_at: str = "";
 }
 
-"""Give one sentence of brief, encouraging feedback or a helpful tip for this todo task"""
-def get_todo_feedback(title: str) -> str by llm();
-
-def:pub add_todo(title: str) -> Todo {
-    feedback = get_todo_feedback(title);
-    new_todo = Todo(title=title, feedback=feedback);
-    root() ++> new_todo;
-    return new_todo;
+def:pub save_memo(title: str, audio_data: str) -> Memo {
+    memo = Memo(
+        title=title,
+        audio_data=audio_data,
+        created_at=str(datetime.now())
+    );
+    root() ++> memo;
+    return memo;
 }
 
-def:pub get_todos() -> list[Todo] {
-    return [root()-->][?:Todo];
+def:pub get_memos() -> list[Memo] {
+    return [root()-->][?:Memo];
 }
 
-def:pub toggle_todo(todo_id: str) -> Todo | None {
-    for t in [root()-->][?:Todo] {
-        if jid(t) == todo_id {
-            t.done = not t.done;
-            return t;
+def:pub delete_memo(memo_id: str) -> bool {
+    for m in [root()-->][?:Memo] {
+        if jid(m) == memo_id {
+            del m;
+            return True;
         }
     }
-    return None;
+    return False;
 }
 
 cl {
+    glob _recorder: Any = None;
+
     def:pub app() -> JsxElement {
-        has todos: list[Todo] = [];
-        has text: str = "";
+        has memos: list = [];
         has loading: bool = True;
-        has adding: bool = False;
+        has recording: bool = False;
+        has saving: bool = False;
+        has title: str = "";
+        has error: str = "";
 
         async can with entry {
-            todos = await get_todos();
+            memos = await get_memos();
             loading = False;
         }
 
-        async def handle_add() {
-            if text.strip() {
-                adding = True;
-                todo = await add_todo(text.strip());
-                todos = todos + [todo];
-                text = "";
-                adding = False;
+        async def do_save(audio_data: str) {
+            saving = True;
+            name = (title.strip() if title.strip() else "Voice Memo");
+            memo = await save_memo(name, audio_data);
+            memos = memos + [memo];
+            title = "";
+            saving = False;
+        }
+
+        async def start_rec() {
+            error = "";
+            nav: Any = navigator;
+            stream: Any = await nav.mediaDevices.getUserMedia({"audio": True});
+            rfl: Any = Reflect;
+            MR: Any = MediaRecorder;
+            rec: Any = rfl.construct(MR, [stream]);
+            chunks: Any = [];
+
+            rec.ondataavailable = lambda(e: Any) {
+                if e.data and e.data.size > 0 {
+                    chunks.push(e.data);
+                }
+            };
+
+            rec.onstop = lambda {
+                BlobCls: Any = Blob;
+                FRCls: Any = FileReader;
+                blob: Any = rfl.construct(BlobCls, [chunks, {"type": "audio/webm"}]);
+                reader: Any = rfl.construct(FRCls, []);
+                reader.onloadend = lambda {
+                    do_save(reader.result);
+                };
+                reader.readAsDataURL(blob);
+                tracks: Any = stream.getTracks();
+                tracks.forEach(lambda(t: Any) { t.stop(); });
+            };
+
+            rec.start();
+            _recorder = rec;
+            recording = True;
+        }
+
+        def stop_rec() {
+            if _recorder {
+                rec: Any = _recorder;
+                if rec.state != "inactive" {
+                    rec.stop();
+                }
+                _recorder = None;
+                recording = False;
             }
         }
 
-        async def handle_toggle(tid: str) {
-            updated = await toggle_todo(tid);
-            if updated {
-                todos = [updated if jid(t) == tid else t for t in todos];
-            }
+        async def handle_delete(mid: str) {
+            await delete_memo(mid);
+            memos = [m for m in memos if jid(m) != mid];
         }
 
-        return <div style={{"maxWidth": "600px", "margin": "40px auto", "fontFamily": "sans-serif"}}>
-            <h1>Jac Full-Stack Test</h1>
-            <p style={{"color": "green"}}>
-                If you can see this, your setup is working!
-            </p>
-            <div style={{"display": "flex", "gap": "8px", "marginBottom": "16px"}}>
+        if loading {
+            return <div style={{"maxWidth": "600px", "margin": "40px auto", "fontFamily": "sans-serif"}}>
+                <p>Loading...</p>
+            </div>;
+        }
+
+        return <div style={{"maxWidth": "600px", "margin": "40px auto", "fontFamily": "sans-serif", "padding": "0 16px"}}>
+            <h1 style={{"marginBottom": "4px"}}>Voice Memos</h1>
+            {error and <p style={{"color": "red"}}>{error}</p>}
+            {saving and <p style={{"color": "#888", "fontStyle": "italic"}}>Saving memo...</p>}
+            <div style={{"marginBottom": "24px", "padding": "16px", "background": "#f9f9f9", "borderRadius": "8px"}}>
                 <input
-                    value={text}
-                    onChange={lambda e: ChangeEvent { text = e.target.value; }}
-                    onKeyDown={lambda e: KeyboardEvent {
-                        if e.key == "Enter" { handle_add(); }
-                    }}
-                    placeholder="Add a todo..."
-                    style={{"flex": "1", "padding": "8px"}}
-                    disabled={adding}
+                    value={title}
+                    onChange={lambda e: ChangeEvent { title = e.target.value; }}
+                    placeholder="Memo title (optional)..."
+                    style={{"width": "100%", "padding": "8px", "marginBottom": "12px", "boxSizing": "border-box"}}
+                    disabled={recording or saving}
                 />
-                <button
-                    onClick={lambda { handle_add(); }}
-                    style={{"padding": "8px 16px"}}
-                    disabled={adding}
-                >
-                    {("Adding..." if adding else "Add")}
-                </button>
+                <div style={{"display": "flex", "alignItems": "center", "gap": "12px"}}>
+                    {not recording and <button
+                        onClick={lambda { start_rec(); }}
+                        disabled={saving}
+                        style={{"padding": "12px 28px", "background": "#e74c3c", "color": "white", "border": "none", "borderRadius": "50px", "cursor": "pointer", "fontSize": "15px"}}
+                    >
+                        Record
+                    </button>}
+                    {recording and <button
+                        onClick={lambda { stop_rec(); }}
+                        style={{"padding": "12px 28px", "background": "#333", "color": "white", "border": "none", "borderRadius": "50px", "cursor": "pointer", "fontSize": "15px"}}
+                    >
+                        Stop
+                    </button>}
+                    {recording and <span style={{"color": "#e74c3c", "fontWeight": "bold"}}>
+                        Recording...
+                    </span>}
+                </div>
             </div>
-            {loading and <p>Loading...</p>}
+            {not memos and <p style={{"color": "#aaa", "textAlign": "center"}}>No memos yet. Hit Record to start!</p>}
             <ul style={{"listStyle": "none", "padding": "0"}}>
                 {[
                     <li
-                        key={jid(t)}
-                        style={{
-                            "padding": "12px",
-                            "marginBottom": "8px",
-                            "background": "#f5f5f5",
-                            "borderRadius": "4px"
-                        }}
+                        key={jid(m)}
+                        style={{"padding": "14px", "marginBottom": "10px", "background": "#f5f5f5", "borderRadius": "8px"}}
                     >
-                        <div
-                            style={{"display": "flex", "alignItems": "center", "gap": "8px", "cursor": "pointer"}}
-                            onClick={lambda { handle_toggle(jid(t)); }}
-                        >
-                            <span style={{"textDecoration": ("line-through" if t.done else "none"), "fontWeight": "500"}}>
-                                {t.title}
-                            </span>
+                        <div style={{"display": "flex", "justifyContent": "space-between", "alignItems": "flex-start", "marginBottom": "8px"}}>
+                            <div>
+                                <strong>{m.title}</strong>
+                                <p style={{"margin": "2px 0 0", "fontSize": "0.75em", "color": "#999"}}>{m.created_at}</p>
+                            </div>
+                            <button
+                                onClick={lambda { handle_delete(jid(m)); }}
+                                style={{"background": "none", "border": "none", "cursor": "pointer", "color": "#bbb", "fontSize": "18px"}}
+                            >
+                                x
+                            </button>
                         </div>
-                        {t.feedback and <p style={{"margin": "6px 0 0 24px", "color": "#555", "fontSize": "0.9em", "fontStyle": "italic"}}>
-                            Claude: {t.feedback}
-                        </p>}
+                        <audio controls src={m.audio_data} style={{"width": "100%"}} />
                     </li>
-                    for t in todos
+                    for m in memos
                 ]}
             </ul>
         </div>;
