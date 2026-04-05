@@ -1,0 +1,16 @@
+# API Keys & Secrets
+.env
+.env.local
+.env.*.local
+*.key
+secrets.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Jac build output
+.jac/
+
+# Node
+node_modules/
