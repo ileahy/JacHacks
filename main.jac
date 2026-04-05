@@ -7,7 +7,7 @@ import from urllib.parse { urlencode }
 import from json { loads, dumps }
 import from byllm.llm { Model }
 
-glob llm = Model(model_name="gpt-4o");
+glob llm = Model(model_name="claude-sonnet-4-6");
 
 # ── Data Nodes ────────────────────────────────────────────────────────────────
 
