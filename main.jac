@@ -7,7 +7,7 @@ import from urllib.parse { urlencode }
 import from json { loads, dumps }
 import from byllm.llm { Model }
 
-glob llm = Model(model_name="claude-sonnet-4-6");
+glob llm = Model(model_name="claude-haiku-4-5-20251001");
 
 # ── LLM Output Types ─────────────────────────────────────────────────────────
 
@@ -274,6 +274,28 @@ walker:pub save_and_search {
     }
 }
 
+# ── Autocomplete API ─────────────────────────────────────────────────────────
+
+walker:pub get_autocomplete {
+    has query: str;
+
+    can suggest with Root entry {
+        places_key = environ.get("GOOGLE_PLACES_API_KEY", "");
+        if not places_key or len(self.query) < 3 {
+            report [];
+            disengage;
+        }
+        params = urlencode({"input": self.query, "types": "geocode", "key": places_key});
+        url = "https://maps.googleapis.com/maps/api/place/autocomplete/json?" + params;
+        resp = loads(urlopen(url).read().decode("utf-8"));
+        if resp.get("status") == "OK" {
+            report [p.get("description", "") for p in resp.get("predictions", [])[:5]];
+        } else {
+            report [];
+        }
+    }
+}
+
 # ── Client Component ──────────────────────────────────────────────────────────
 
 cl import from "@jac/runtime" { jacSpawn }
@@ -288,6 +310,11 @@ cl {
         # Form — location
         has location: str = "";
         has radius: str = "5";
+
+        # Autocomplete
+        has suggestions: list = [];
+        has show_suggestions: bool = False;
+        has debounce_id: Any = None;
 
         # Form — hard constraints (tag lists)
         has allergy_input: str = "";
@@ -393,6 +420,35 @@ cl {
             }
         }
 
+        # ── Autocomplete ──────────────────────────────────────────────────────
+
+        async def do_fetch_suggestions(q: str) {
+            result = await jacSpawn("get_autocomplete", "", {"query": q});
+            if result.reports and result.reports.length > 0 {
+                suggestions = result.reports[0];
+                show_suggestions = len(suggestions) > 0;
+            }
+        }
+
+        def on_location_change(val: str) {
+            location = val;
+            if debounce_id is not None {
+                clearTimeout(debounce_id);
+            }
+            if len(val) >= 3 {
+                debounce_id = setTimeout(lambda -> None { do_fetch_suggestions(val); }, 400);
+            } else {
+                suggestions = [];
+                show_suggestions = False;
+            }
+        }
+
+        def select_suggestion(s: str) {
+            location = s;
+            suggestions = [];
+            show_suggestions = False;
+        }
+
         # ── Submit ────────────────────────────────────────────────────────────
 
         async def handle_submit() {
@@ -440,7 +496,7 @@ cl {
                             "fontWeight": "700"}}>Finding your perfect meals...</h2>
                 <p style={{"color": "#888", "fontSize": "15px", "maxWidth": "420px",
                            "margin": "0 auto 32px", "lineHeight": "1.6"}}>
-                    Searching stores near <strong>{location}</strong> and crafting
+                    Searching stores near  <strong>{location}</strong> and crafting
                     recipes tailored to your preferences.
                 </p>
                 <div style={{"display": "flex", "justifyContent": "center", "gap": "10px"}}>
@@ -678,17 +734,46 @@ cl {
                 <p style={{"margin": "0 0 16px", "fontSize": "13px", "color": "#888"}}>
                     Where should we search?
                 </p>
-                <div style={{"marginBottom": "16px"}}>
+                <div style={{"marginBottom": "16px", "position": "relative"}}>
                     <label style={s_label}>Your Address or City</label>
                     <input
                         value={location}
-                        onChange={lambda(e: Any) { location = e.target.value; }}
+                        onChange={lambda(e: Any) { on_location_change(e.target.value); }}
                         onKeyDown={lambda(e: Any) {
-                            if e.key == "Enter" { handle_submit(); }
+                            if e.key == "Enter" {
+                                suggestions = [];
+                                show_suggestions = False;
+                                handle_submit();
+                            }
+                            if e.key == "Escape" {
+                                suggestions = [];
+                                show_suggestions = False;
+                            }
                         }}
-                        placeholder="e.g. Montreal, QC  or  123 Main St, Toronto"
+                        onBlur={lambda(e: Any) {
+                            setTimeout(lambda -> None { show_suggestions = False; }, 150);
+                        }}
+                        placeholder="e.g. 123 Main St, Ann Arbor, MI"
                         style={s_input}
                     />
+                    {show_suggestions and <div style={{"position": "absolute", "top": "100%",
+                                                        "left": "0", "right": "0",
+                                                        "background": "white",
+                                                        "border": "1px solid #ddd",
+                                                        "borderTop": "none",
+                                                        "borderRadius": "0 0 8px 8px",
+                                                        "boxShadow": "0 4px 12px rgba(0,0,0,0.1)",
+                                                        "zIndex": "100"}}>
+                        {[<div
+                            key={s}
+                            onMouseDown={lambda(e: Any) { select_suggestion(s); }}
+                            style={{"padding": "10px 14px", "cursor": "pointer",
+                                    "fontSize": "14px", "color": "#333",
+                                    "borderBottom": "1px solid #f5f5f5"}}
+                        >
+                            📍 {s}
+                        </div> for s in suggestions]}
+                    </div>}
                 </div>
                 <div>
                     <label style={s_label}>Search Radius: {radius} miles</label>
