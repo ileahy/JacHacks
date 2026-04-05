@@ -122,6 +122,8 @@ def fetch_nearby_stores(lat: float, lng: float, radius_meters: int, api_key: str
                 "name": place.get("name", ""),
                 "address": place.get("vicinity", ""),
                 "distance_miles": dist,
+                "lat": slat,
+                "lng": slng,
                 "rating": place.get("rating", None),
                 "types": place.get("types", []),
                 "open_now": place.get("opening_hours", {}).get("open_now", None)
@@ -270,7 +272,16 @@ walker:pub save_and_search {
             created_at=str(datetime.now())
         );
         prefs ++> sr;
-        report data;
+        report {
+            "stores": data.stores,
+            "recipes": data.recipes,
+            "summary": data.summary,
+            "center_lat": coords["lat"],
+            "center_lng": coords["lng"],
+            "radius_miles": self.radius_miles,
+            "store_locations": raw_stores,
+            "maps_api_key": places_key
+        };
     }
 }
 
@@ -337,6 +348,9 @@ cl {
         has recipes: list = [];
         has summary: str = "";
         has expanded_recipe: str = "";
+
+        # Map (rendered as self-contained HTML for an iframe)
+        has map_html: str = "";
 
         # ── Shared styles ─────────────────────────────────────────────────────
         s_wrap = {"maxWidth": "660px", "margin": "0 auto",
@@ -449,6 +463,55 @@ cl {
             show_suggestions = False;
         }
 
+        # ── Map helpers ───────────────────────────────────────────────────────
+        # Google Maps JS API needs the `new` keyword (unsupported in Jac), so the
+        # map is rendered inside a self-contained iframe via srcdoc.
+
+        def build_map_html(api_key: str, clat: float, clng: float,
+                           r_mi: float, raw_stores: list) -> str {
+            sj = JSON.stringify(raw_stores);
+            lat_s = str(clat);
+            lng_s = str(clng);
+            r_s = str(r_mi);
+            return "<!DOCTYPE html><html><head>"
+                + "<meta charset='utf-8'>"
+                + "<style>*{margin:0;padding:0}html,body,#m{width:100%;height:100%}</style>"
+                + "</head><body><div id='m'></div>"
+                + "<script>"
+                + "function initMap(){"
+                + "var c={lat:" + lat_s + ",lng:" + lng_s + "};"
+                + "var m=new google.maps.Map(document.getElementById('m'),{"
+                + "center:c,zoom:12,disableDefaultUI:false,zoomControl:true,"
+                + "mapTypeControl:false,streetViewControl:false,fullscreenControl:false});"
+                + "new google.maps.Marker({position:c,map:m,title:'Your Location',"
+                + "icon:{path:google.maps.SymbolPath.CIRCLE,scale:10,"
+                + "fillColor:'#2ecc71',fillOpacity:1,strokeColor:'#fff',strokeWeight:3}});"
+                + "new google.maps.Circle({map:m,center:c,radius:" + r_s + "*1609.34,"
+                + "fillColor:'#2ecc71',fillOpacity:0.08,"
+                + "strokeColor:'#2ecc71',strokeWeight:2,strokeOpacity:0.5});"
+                + "var ss=" + sj + "||[];"
+                + "for(var i=0;i<ss.length;i++){(function(s){"
+                + "var la=parseFloat(s.lat||0),lo=parseFloat(s.lng||0);"
+                + "if(!la||!lo)return;"
+                + "var mk=new google.maps.Marker({position:{lat:la,lng:lo},map:m,title:s.name||''});"
+                + "var iw=new google.maps.InfoWindow({content:"
+                + "'<b>'+(s.name||'')+'</b><br><span style=color:#777>'+(s.address||'')+'</span>'});"
+                + "mk.addListener('click',function(){iw.open(m,mk);});"
+                + "})(ss[i])}"
+                + "var b=new google.maps.LatLngBounds();"
+                + "var rd=" + r_s + "/69.0,rl=" + r_s + "/(69.0*0.7854);"
+                + "b.extend({lat:" + lat_s + "+rd,lng:" + lng_s + "});"
+                + "b.extend({lat:" + lat_s + "-rd,lng:" + lng_s + "});"
+                + "b.extend({lat:" + lat_s + ",lng:" + lng_s + "+rl});"
+                + "b.extend({lat:" + lat_s + ",lng:" + lng_s + "-rl});"
+                + "m.fitBounds(b);"
+                + "}"
+                + "</script>"
+                + "<script src='https://maps.googleapis.com/maps/api/js?key="
+                + api_key + "&callback=initMap' async defer></script>"
+                + "</body></html>";
+        }
+
         # ── Submit ────────────────────────────────────────────────────────────
 
         async def handle_submit() {
@@ -476,6 +539,13 @@ cl {
                 stores = data.stores or [];
                 recipes = data.recipes or [];
                 summary = data.summary or "";
+                ak = str(data["maps_api_key"] or "");
+                cl = float(data["center_lat"] or 0);
+                cg = float(data["center_lng"] or 0);
+                sl = data["store_locations"] or [];
+                if ak and cl and cg {
+                    map_html = build_map_html(ak, cl, cg, float(radius), sl);
+                }
                 active_tab = "stores";
                 view = "results";
             } else {
@@ -533,6 +603,16 @@ cl {
                 {summary and <div style={s_summary}>
                     <p style={{"margin": "0", "color": "#1e8449", "fontSize": "14px",
                                "lineHeight": "1.6"}}>{summary}</p>
+                </div>}
+
+                {map_html and <div style={s_card}>
+                    <h3 style={{"margin": "0 0 12px", "fontSize": "15px", "color": "#222",
+                                "fontWeight": "700"}}>🗺️ Nearby Stores</h3>
+                    <iframe
+                        srcDoc={map_html}
+                        style={{"width": "100%", "height": "350px", "border": "none",
+                                "borderRadius": "8px"}}
+                    />
                 </div>}
 
                 <div style={{"display": "flex", "borderBottom": "2px solid #f0f0f0",
