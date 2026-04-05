@@ -9,6 +9,61 @@ import from byllm.llm { Model }
 
 glob llm = Model(model_name="claude-sonnet-4-6");
 
+# ── LLM Output Types ─────────────────────────────────────────────────────────
+
+obj Macros {
+    has calories: int,
+        protein_g: float,
+        carbs_g: float,
+        fat_g: float;
+}
+
+obj FoodItem {
+    has name: str,
+        category: str,
+        estimated_price: float,
+        unit: str,
+        macros_per_100g: Macros,
+        notes: str;
+}
+
+obj StoreResult {
+    has name: str,
+        address: str,
+        distance_miles: float,
+        store_type: str,
+        hours: str,
+        items: list[FoodItem];
+}
+
+obj Ingredient {
+    has item: str,
+        quantity: str,
+        store: str,
+        estimated_price: float;
+}
+
+obj Recipe {
+    has name: str,
+        description: str,
+        prep_time_mins: int,
+        cook_time_mins: int,
+        servings: int,
+        estimated_cost: float,
+        macros_per_serving: Macros,
+        macro_deviation_pct: float,
+        budget_deviation_pct: float,
+        ingredients: list[Ingredient],
+        instructions: list[str],
+        tags: list[str];
+}
+
+obj LLMResult {
+    has stores: list[StoreResult],
+        recipes: list[Recipe],
+        summary: str;
+}
+
 # ── Data Nodes ────────────────────────────────────────────────────────────────
 
 node UserPreferences {
@@ -27,8 +82,8 @@ node UserPreferences {
 }
 
 node SearchResult {
-    has stores: list[dict] = [],
-        recipes: list[dict] = [],
+    has stores: list[StoreResult] = [],
+        recipes: list[Recipe] = [],
         summary: str = "",
         created_at: str = "";
 }
@@ -43,7 +98,7 @@ def geocode_location(location: str, api_key: str) -> dict {
         loc = resp["results"][0]["geometry"]["location"];
         return {"lat": loc["lat"], "lng": loc["lng"]};
     }
-    return {};
+    return {"error": resp.get("status", "UNKNOWN") + ": " + resp.get("error_message", "no details")};
 }
 
 def fetch_nearby_stores(lat: float, lng: float, radius_meters: int, api_key: str) -> list {
@@ -98,47 +153,21 @@ SOFT CONSTRAINTS — target values per meal; may deviate by up to `macro_flex_pc
   - calories (kcal), protein_g (g), carbs_g (g), fat_g (g)
   - budget (USD)
 
-Return ONLY a valid Python dict with exactly this structure (no markdown, no explanation):
-{
-  "stores": [
-    {
-      "name": str,
-      "address": str,
-      "distance_miles": float,
-      "type": str,
-      "hours": str,
-      "items": [
-        {
-          "name": str,
-          "category": str,
-          "estimated_price": float,
-          "unit": str,
-          "macros_per_100g": {"calories": int, "protein_g": float, "carbs_g": float, "fat_g": float},
-          "notes": str
-        }
-      ]
-    }
-  ],
-  "recipes": [
-    {
-      "name": str,
-      "description": str,
-      "prep_time_mins": int,
-      "cook_time_mins": int,
-      "servings": int,
-      "estimated_cost": float,
-      "macros_per_serving": {"calories": int, "protein_g": float, "carbs_g": float, "fat_g": float},
-      "macro_deviation_pct": float,
-      "budget_deviation_pct": float,
-      "ingredients": [{"item": str, "quantity": str, "store": str, "estimated_price": float}],
-      "instructions": [str],
-      "tags": [str]
-    }
-  ],
-  "summary": str
-}
-For each store in "stores", copy name/address/distance_miles from the input data exactly.
-Set "type" from the store's types list and "hours" to "Open now" or "Closed" based on open_now.
+For each store, return a StoreResult with these fields:
+  name, address, distance_miles (copy exactly from input),
+  store_type (derive from the store's types list),
+  hours ("Open now" or "Closed" based on open_now),
+  items (list of FoodItem).
+
+Each FoodItem: name, category, estimated_price, unit,
+  macros_per_100g (Macros: calories, protein_g, carbs_g, fat_g), notes.
+
+Each Recipe: name, description, prep_time_mins, cook_time_mins, servings,
+  estimated_cost, macros_per_serving (Macros), macro_deviation_pct,
+  budget_deviation_pct, ingredients (list of Ingredient: item, quantity, store,
+  estimated_price), instructions (list of str), tags (list of str).
+
+Return a single LLMResult with stores, recipes, and summary fields.
 """
 def generate_items_and_recipes(
     stores_json: str,
@@ -151,95 +180,103 @@ def generate_items_and_recipes(
     macro_flex_pct: int,
     conditions: list[str],
     restrictions: list[str]
-) -> dict by llm();
+) -> LLMResult by llm();
 
 # ── Backend Public API ────────────────────────────────────────────────────────
 
-def:pub save_and_search(
-    location: str,
-    radius_miles: float,
-    allergies: list[str],
-    budget: float,
-    calories: int,
-    protein_g: int,
-    carbs_g: int,
-    fat_g: int,
-    macro_flex_pct: int,
-    conditions: list[str],
-    restrictions: list[str]
-) -> dict {
-    prefs = UserPreferences(
-        location=location,
-        radius_miles=radius_miles,
-        allergies=allergies,
-        budget=budget,
-        calories=calories,
-        protein_g=protein_g,
-        carbs_g=carbs_g,
-        fat_g=fat_g,
-        macro_flex_pct=macro_flex_pct,
-        conditions=conditions,
-        restrictions=restrictions,
-        created_at=str(datetime.now())
-    );
-    root() ++> prefs;
+walker:pub save_and_search {
+    has location: str,
+        radius_miles: float,
+        allergies: list[str],
+        budget: float,
+        calories: int,
+        protein_g: int,
+        carbs_g: int,
+        fat_g: int,
+        macro_flex_pct: int,
+        conditions: list[str],
+        restrictions: list[str];
 
-    places_key = environ.get("GOOGLE_PLACES_API_KEY", "");
-    if not places_key {
-        return {
-            "stores": [],
-            "recipes": [],
-            "summary": "Error: GOOGLE_PLACES_API_KEY environment variable is not set."
-        };
+    can search with Root entry {
+        prefs = UserPreferences(
+            location=self.location,
+            radius_miles=self.radius_miles,
+            allergies=self.allergies,
+            budget=self.budget,
+            calories=self.calories,
+            protein_g=self.protein_g,
+            carbs_g=self.carbs_g,
+            fat_g=self.fat_g,
+            macro_flex_pct=self.macro_flex_pct,
+            conditions=self.conditions,
+            restrictions=self.restrictions,
+            created_at=str(datetime.now())
+        );
+        here ++> prefs;
+
+        places_key = environ.get("GOOGLE_PLACES_API_KEY", "");
+        if not places_key {
+            report {
+                "stores": [],
+                "recipes": [],
+                "summary": "Error: GOOGLE_PLACES_API_KEY environment variable is not set."
+            };
+            disengage;
+        }
+
+        # 1. Convert address to coordinates
+        coords = geocode_location(self.location, places_key);
+        if not coords or "error" in coords {
+            geo_err = coords.get("error", "unknown error") if coords else "no response";
+            report {
+                "stores": [],
+                "recipes": [],
+                "summary": "Geocoding failed (" + geo_err + "). Check that the Geocoding API is enabled and billing is active in Google Cloud Console."
+            };
+            disengage;
+        }
+
+        # 2. Find real nearby stores via Google Places
+        radius_meters = int(self.radius_miles * 1609.34);
+        raw_stores = fetch_nearby_stores(coords["lat"], coords["lng"], radius_meters, places_key);
+        if not raw_stores {
+            report {
+                "stores": [],
+                "recipes": [],
+                "summary": "No grocery stores found within " + str(self.radius_miles) + " miles. Try increasing your radius."
+            };
+            disengage;
+        }
+
+        # 3. Ask Claude to add item recommendations + recipes based on real stores
+        stores_json = dumps(raw_stores);
+        data = generate_items_and_recipes(
+            stores_json=stores_json,
+            allergies=self.allergies,
+            budget=self.budget,
+            calories=self.calories,
+            protein_g=self.protein_g,
+            carbs_g=self.carbs_g,
+            fat_g=self.fat_g,
+            macro_flex_pct=self.macro_flex_pct,
+            conditions=self.conditions,
+            restrictions=self.restrictions
+        );
+
+        sr = SearchResult(
+            stores=data.stores,
+            recipes=data.recipes,
+            summary=data.summary,
+            created_at=str(datetime.now())
+        );
+        prefs ++> sr;
+        report data;
     }
-
-    # 1. Convert address to coordinates
-    coords = geocode_location(location, places_key);
-    if not coords {
-        return {
-            "stores": [],
-            "recipes": [],
-            "summary": "Could not find that location. Please try a more specific address."
-        };
-    }
-
-    # 2. Find real nearby stores via Google Places
-    radius_meters = int(radius_miles * 1609.34);
-    raw_stores = fetch_nearby_stores(coords["lat"], coords["lng"], radius_meters, places_key);
-    if not raw_stores {
-        return {
-            "stores": [],
-            "recipes": [],
-            "summary": "No grocery stores found within " + str(radius_miles) + " miles. Try increasing your radius."
-        };
-    }
-
-    # 3. Ask Claude to add item recommendations + recipes based on real stores
-    stores_json = dumps(raw_stores);
-    data = generate_items_and_recipes(
-        stores_json=stores_json,
-        allergies=allergies,
-        budget=budget,
-        calories=calories,
-        protein_g=protein_g,
-        carbs_g=carbs_g,
-        fat_g=fat_g,
-        macro_flex_pct=macro_flex_pct,
-        conditions=conditions,
-        restrictions=restrictions
-    );
-
-    sr = SearchResult(
-        stores=data.get("stores", []),
-        recipes=data.get("recipes", []),
-        summary=data.get("summary", ""),
-        created_at=str(datetime.now())
-    );
-    prefs ++> sr;
-    return data;
 }
 
 # ── Client Component ──────────────────────────────────────────────────────────
+
+cl import from "@jac/runtime" { jacSpawn }
 
 cl {
     def:pub app() -> JsxElement {
@@ -365,23 +402,24 @@ cl {
             }
             error = "";
             view = "loading";
-            result = await save_and_search(
-                location=location.strip(),
-                radius_miles=float(radius),
-                allergies=allergies,
-                budget=float(budget),
-                calories=int(calories),
-                protein_g=int(protein),
-                carbs_g=int(carbs),
-                fat_g=int(fat),
-                macro_flex_pct=int(macro_flex),
-                conditions=conditions,
-                restrictions=restrictions
-            );
-            if result {
-                stores = result.stores or [];
-                recipes = result.recipes or [];
-                summary = result.summary or "";
+            result = await jacSpawn("save_and_search", "", {
+                "location": location.strip(),
+                "radius_miles": float(radius),
+                "allergies": allergies,
+                "budget": float(budget),
+                "calories": int(calories),
+                "protein_g": int(protein),
+                "carbs_g": int(carbs),
+                "fat_g": int(fat),
+                "macro_flex_pct": int(macro_flex),
+                "conditions": conditions,
+                "restrictions": restrictions
+            });
+            if result.reports and result.reports.length > 0 {
+                data = result.reports[0];
+                stores = data.stores or [];
+                recipes = data.recipes or [];
+                summary = data.summary or "";
                 active_tab = "stores";
                 view = "results";
             } else {
@@ -472,7 +510,7 @@ cl {
                      <p style={{"color": "#bbb", "textAlign": "center", "padding": "40px 0"}}>
                          No stores found. Try increasing your radius.
                      </p>}
-                    {[<div key={s.name} style={s_card}>
+                    {[<div key={s.address} style={s_card}>
                         <div style={{"display": "flex", "justifyContent": "space-between",
                                       "alignItems": "flex-start", "marginBottom": "12px"}}>
                             <div>
@@ -488,7 +526,7 @@ cl {
                             <div style={{"textAlign": "right", "flexShrink": "0",
                                          "marginLeft": "12px"}}>
                                 <span style={s_dist_pill}>{str(s.distance_miles)} mi</span>
-                                <span style={{"color": "#bbb", "fontSize": "12px"}}>{s.type}</span>
+                                <span style={{"color": "#bbb", "fontSize": "12px"}}>{s.store_type}</span>
                             </div>
                         </div>
                         {s.items and <div>
