@@ -164,8 +164,7 @@ cl {
                             "fontWeight": "700"}}>Finding your perfect meals...</h2>
                 <p style={{"color": "#888", "fontSize": "15px", "maxWidth": "420px",
                            "margin": "0 auto 32px", "lineHeight": "1.6"}}>
-                    Searching stores near <strong>{location}</strong> and crafting
-                    recipes tailored to your preferences.
+                    {"Searching stores near "} <strong>{location}</strong> {" and crafting recipes tailored to your preferences."}
                 </p>
                 <div style={{"display": "flex", "justifyContent": "center", "gap": "10px"}}>
                     <div style={{"width": "12px", "height": "12px", "borderRadius": "50%",
