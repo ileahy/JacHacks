@@ -430,6 +430,12 @@ cl {
         has recipes: list = [];
         has summary: str = "";
         has expanded_recipe: str = "";
+        has store_sort_mode: str = "best_match";
+        has recipe_sort_mode: str = "best_match";
+        has store_open_only: bool = False;
+        has recipe_store_filter: str = "";
+        has expanded_store_key: str = "";
+        has show_recipe_tags: bool = False;
 
         # Map (rendered as self-contained HTML for an iframe)
         has map_html: str = "";
@@ -451,6 +457,12 @@ cl {
         # ── Shared styles ─────────────────────────────────────────────────────
         s_wrap = {"maxWidth": "660px", "margin": "0 auto",
                   "fontFamily": "system-ui,-apple-system,sans-serif", "padding": "24px 16px"};
+        s_wrap_results = {"maxWidth": "1320px", "margin": "0 auto",
+                          "fontFamily": "system-ui,-apple-system,sans-serif",
+                          "padding": "28px 32px", "width": "100%", "boxSizing": "border-box"};
+        s_grid_results = {"display": "grid",
+                          "gridTemplateColumns": "repeat(auto-fit, minmax(520px, 1fr))",
+                          "gap": "22px", "alignItems": "start"};
         s_card = {"background": "var(--cd)", "borderRadius": "12px", "padding": "24px",
                   "marginBottom": "20px", "boxShadow": "var(--sh)"};
         s_input = {"width": "100%", "padding": "10px 14px", "borderRadius": "8px",
@@ -498,8 +510,8 @@ cl {
         s_cost_pill = {"background": "var(--gb)", "color": "var(--gt)", "borderRadius": "20px",
                        "padding": "5px 14px", "fontSize": "14px", "fontWeight": "700",
                        "whiteSpace": "nowrap", "marginLeft": "16px", "flexShrink": "0"};
-        s_summary   = {"background": "var(--gb)", "borderRadius": "12px", "padding": "16px",
-                       "marginBottom": "20px", "borderLeft": "4px solid #2ecc71"};
+        s_summary   = {"background": "var(--gb)", "borderRadius": "12px", "padding": "18px 22px",
+                       "marginBottom": "24px", "borderLeft": "4px solid #2ecc71"};
         s_tag_grey  = {"display": "inline-block", "background": "var(--dv)", "color": "var(--t5)",
                        "borderRadius": "12px", "padding": "3px 10px", "fontSize": "12px",
                        "marginRight": "5px", "marginBottom": "4px"};
@@ -564,6 +576,431 @@ cl {
             elif goal == "high_protein" { calories = "550"; protein = "45"; carbs = "35"; fat = "20"; }
             elif goal == "low_carb" { calories = "500"; protein = "35"; carbs = "20"; fat = "30"; }
             elif goal == "balanced" { calories = "550"; protein = "30"; carbs = "50"; fat = "25"; }
+        }
+
+        # ── Results helpers (sorting, badges, metrics) ─────────────────────────
+
+        def _f(x: Any) -> float {
+            return float(x);
+        }
+
+        def _store_basket_est(s: Any) -> float {
+            tot = 0.0;
+            if not s.items {
+                return 0.0;
+            }
+            for it in s.items {
+                tot = tot + _f(it.estimated_price);
+            }
+            return tot;
+        }
+
+        def _store_item_count(s: Any) -> int {
+            if not s.items {
+                return 0;
+            }
+            return len(s.items);
+        }
+
+        def _guess_store_open(s: Any) -> bool {
+            h = (s.hours or "").lower();
+            if "closed" in h {
+                if "open" in h {
+                    return True;
+                }
+                return False;
+            }
+            return True;
+        }
+
+        def _best_match_score_store(s: Any, budget_s: str) -> float {
+            dist = _f(s.distance_miles);
+            basket = _store_basket_est(s);
+            b = _f(budget_s);
+            if b < 1.0 {
+                b = 15.0;
+            }
+            return dist * 2.2 + abs(basket - b) * 0.12;
+        }
+
+        def _recipe_best_dev(r: Any) -> float {
+            bd = 0.0;
+            md = 0.0;
+            if r.budget_deviation_pct is not None {
+                bd = abs(_f(r.budget_deviation_pct));
+            }
+            if r.macro_deviation_pct is not None {
+                md = abs(_f(r.macro_deviation_pct));
+            }
+            return bd + md;
+        }
+
+        def _recipe_time(r: Any) -> int {
+            return int(r.prep_time_mins) + int(r.cook_time_mins);
+        }
+
+        def _recipe_protein(r: Any) -> float {
+            if r.macros_per_serving {
+                return _f(r.macros_per_serving.protein_g);
+            }
+            return 0.0;
+        }
+
+        def _recipe_cal(r: Any) -> float {
+            if r.macros_per_serving {
+                return _f(r.macros_per_serving.calories);
+            }
+            return 99999.0;
+        }
+
+        def _recipe_cost(r: Any) -> float {
+            return _f(r.estimated_cost);
+        }
+
+        def _join_short(items: list, sep: str, cap: int) -> str {
+            if not items or len(items) == 0 {
+                return "—";
+            }
+            out = "";
+            n = len(items);
+            if n > cap {
+                n = cap;
+            }
+            for i in range(n) {
+                if i > 0 {
+                    out = out + sep;
+                }
+                out = out + str(items[i]);
+            }
+            if len(items) > cap {
+                out = out + " +" + str(len(items) - cap);
+            }
+            return out;
+        }
+
+        def _store_key(s: Any) -> str {
+            return str(s.name) + "|" + str(s.address);
+        }
+
+        def _swap_stores(out: list, i: int, j: int) {
+            tmp = out[i];
+            out[i] = out[j];
+            out[j] = tmp;
+        }
+
+        def sort_stores_list(stores: list, mode: str, only_open: bool, budget_s: str) -> list {
+            out = [];
+            for s in stores {
+                if only_open and not _guess_store_open(s) {
+                    continue;
+                }
+                out = out + [s];
+            }
+            n = len(out);
+            for i in range(n) {
+                for j in range(i + 1, n) {
+                    a = out[i];
+                    b = out[j];
+                    swap = False;
+                    if mode == "closest" {
+                        swap = _f(a.distance_miles) > _f(b.distance_miles);
+                    } elif mode == "cheapest_ingredients" {
+                        swap = _store_basket_est(a) > _store_basket_est(b);
+                    } elif mode == "most_items" {
+                        swap = _store_item_count(a) < _store_item_count(b);
+                    } else {
+                        swap = _best_match_score_store(a, budget_s) > _best_match_score_store(b, budget_s);
+                    }
+                    if swap {
+                        _swap_stores(out, i, j);
+                    }
+                }
+            }
+            return out;
+        }
+
+        def recipe_matches_store_filter(r: Any, filt: str) -> bool {
+            if not filt or filt.strip() == "" {
+                return True;
+            }
+            fl = filt.lower();
+            for ing in r.ingredients {
+                st = (ing.store or "").lower();
+                if fl in st or st in fl {
+                    return True;
+                }
+            }
+            return False;
+        }
+
+        def filter_recipes_list(recipes: list, filt: str) -> list {
+            out = [];
+            for r in recipes {
+                if recipe_matches_store_filter(r, filt) {
+                    out = out + [r];
+                }
+            }
+            return out;
+        }
+
+        def sort_recipes_list(recipes: list, mode: str, budget_s: str) -> list {
+            out = [];
+            for r in recipes {
+                out = out + [r];
+            }
+            budget_val = _f(budget_s);
+            if budget_val < 1.0 {
+                budget_val = 15.0;
+            }
+            n = len(out);
+            for i in range(n) {
+                for j in range(i + 1, n) {
+                    ra = out[i];
+                    rb = out[j];
+                    swap = False;
+                    if mode == "cheapest" {
+                        swap = _recipe_cost(ra) > _recipe_cost(rb);
+                    } elif mode == "highest_protein" {
+                        swap = _recipe_protein(ra) < _recipe_protein(rb);
+                    } elif mode == "lowest_calories" {
+                        swap = _recipe_cal(ra) > _recipe_cal(rb);
+                    } elif mode == "quickest" {
+                        swap = _recipe_time(ra) > _recipe_time(rb);
+                    } elif mode == "budget_fit" {
+                        swap = abs(_recipe_cost(ra) - budget_val) > abs(_recipe_cost(rb) - budget_val);
+                    } else {
+                        swap = _recipe_best_dev(ra) > _recipe_best_dev(rb);
+                    }
+                    if swap {
+                        tmp = out[i];
+                        out[i] = out[j];
+                        out[j] = tmp;
+                    }
+                }
+            }
+            return out;
+        }
+
+        def count_recipes_for_store(store_name: str, recipes: list) -> int {
+            sn = store_name.lower();
+            n = 0;
+            for r in recipes {
+                for ing in r.ingredients {
+                    if sn in (ing.store or "").lower() {
+                        n = n + 1;
+                        break;
+                    }
+                }
+            }
+            return n;
+        }
+
+        def count_unique_stores_in_recipe(r: Any) -> int {
+            seen = [];
+            for ing in r.ingredients {
+                st = (ing.store or "").strip();
+                if not st {
+                    continue;
+                }
+                found = False;
+                for x in seen {
+                    if x == st {
+                        found = True;
+                    }
+                }
+                if not found {
+                    seen = seen + [st];
+                }
+            }
+            return len(seen);
+        }
+
+        def primary_store_for_recipe(r: Any) -> str {
+            best = "";
+            best_n = 0;
+            for cand in r.ingredients {
+                st = (cand.store or "").strip();
+                if not st {
+                    continue;
+                }
+                c = 0;
+                for ing in r.ingredients {
+                    if (ing.store or "").strip() == st {
+                        c = c + 1;
+                    }
+                }
+                if c > best_n {
+                    best_n = c;
+                    best = st;
+                }
+            }
+            return best;
+        }
+
+        def pick_featured_store(stores: list, budget_s: str) -> Any {
+            if not stores or len(stores) == 0 {
+                return None;
+            }
+            best = stores[0];
+            best_sc = _best_match_score_store(stores[0], budget_s);
+            for s in stores {
+                sc = _best_match_score_store(s, budget_s);
+                if sc < best_sc {
+                    best_sc = sc;
+                    best = s;
+                }
+            }
+            return best;
+        }
+
+        def pick_cheapest_recipe(recipes: list) -> Any {
+            if not recipes or len(recipes) == 0 {
+                return None;
+            }
+            best = recipes[0];
+            for r in recipes {
+                if _recipe_cost(r) < _recipe_cost(best) {
+                    best = r;
+                }
+            }
+            return best;
+        }
+
+        def pick_highest_protein_recipe(recipes: list) -> Any {
+            if not recipes or len(recipes) == 0 {
+                return None;
+            }
+            best = recipes[0];
+            for r in recipes {
+                if _recipe_protein(r) > _recipe_protein(best) {
+                    best = r;
+                }
+            }
+            return best;
+        }
+
+        def pick_closest_store(stores: list) -> Any {
+            if not stores or len(stores) == 0 {
+                return None;
+            }
+            best = stores[0];
+            for s in stores {
+                if _f(s.distance_miles) < _f(best.distance_miles) {
+                    best = s;
+                }
+            }
+            return best;
+        }
+
+        def store_badge_label(s: Any, stores: list, budget_s: str) -> str {
+            fs = pick_featured_store(stores, budget_s);
+            cs = pick_closest_store(stores);
+            if fs and _store_key(s) == _store_key(fs) {
+                return "Best overall match";
+            }
+            if cs and _store_key(s) == _store_key(cs) {
+                return "Closest to you";
+            }
+            min_b = 999999.0;
+            for x in stores {
+                mb = _store_basket_est(x);
+                if mb > 0 and mb < min_b {
+                    min_b = mb;
+                }
+            }
+            sb = _store_basket_est(s);
+            if sb > 0 and min_b < 999999.0 and sb == min_b {
+                return "Lowest basket estimate";
+            }
+            max_i = 0;
+            for x in stores {
+                c = _store_item_count(x);
+                if c > max_i {
+                    max_i = c;
+                }
+            }
+            if _store_item_count(s) == max_i and max_i > 0 {
+                return "Most items listed";
+            }
+            return "Within your search";
+        }
+
+        def recipe_badge_label(r: Any, recipes: list, budget_s: str) -> str {
+            cr = pick_cheapest_recipe(recipes);
+            pr = pick_highest_protein_recipe(recipes);
+            if cr and r.name == cr.name {
+                return "Best value";
+            }
+            if pr and r.name == pr.name {
+                return "Highest protein";
+            }
+            min_t = 99999;
+            for x in recipes {
+                t = _recipe_time(x);
+                if t < min_t {
+                    min_t = t;
+                }
+            }
+            if _recipe_time(r) == min_t {
+                return "Quickest to make";
+            }
+            b = _f(budget_s);
+            if b < 1.0 {
+                b = 15.0;
+            }
+            min_d = 99999.0;
+            for x in recipes {
+                d = abs(_recipe_cost(x) - b);
+                if d < min_d {
+                    min_d = d;
+                }
+            }
+            if abs(_recipe_cost(r) - b) == min_d {
+                return "Best budget fit";
+            }
+            if _recipe_best_dev(r) < 8.0 {
+                return "Within your macros";
+            }
+            return "Matches your goals";
+        }
+
+        def items_preview(items: list, show_all: bool) -> list {
+            if not items {
+                return [];
+            }
+            if show_all or len(items) <= 4 {
+                return items;
+            }
+            out = [];
+            for i in range(4) {
+                if i < len(items) {
+                    out = out + [items[i]];
+                }
+            }
+            return out;
+        }
+
+        def _goal_display(g: str) -> str {
+            if not g {
+                return "Custom";
+            }
+            return g.replace("_", " ");
+        }
+
+        def tags_preview(tags: list, all_show: bool) -> list {
+            if not tags {
+                return [];
+            }
+            if all_show or len(tags) <= 2 {
+                return tags;
+            }
+            out = [];
+            for i in range(2) {
+                if i < len(tags) {
+                    out = out + [tags[i]];
+                }
+            }
+            return out;
         }
 
         # ── Autocomplete ──────────────────────────────────────────────────────
@@ -684,6 +1121,9 @@ cl {
                             map_html = build_map_html(ak, cl, cg, float(radius), sl);
                         }
                         active_tab = "stores";
+                        expanded_store_key = "";
+                        recipe_store_filter = "";
+                        expanded_recipe = "";
                         view = "results";
                         return;
                     }
@@ -752,6 +1192,12 @@ cl {
             form_step = 1;
             show_advanced = False;
             selected_goal = "";
+            store_sort_mode = "best_match";
+            recipe_sort_mode = "best_match";
+            store_open_only = False;
+            recipe_store_filter = "";
+            expanded_store_key = "";
+            show_recipe_tags = False;
             view = "landing";
         }
 
@@ -790,6 +1236,9 @@ cl {
                     map_html = build_map_html(ak, cl, cg, float(radius), sl);
                 }
                 active_tab = "stores";
+                expanded_store_key = "";
+                recipe_store_filter = "";
+                expanded_recipe = "";
                 view = "results";
             } else {
                 error = "Search failed. Please try again.";
@@ -1306,123 +1755,407 @@ cl {
         # ═════════════════════════════════════════════════════════════════════
 
         if view == "results" {
-            return <div style={s_wrap}>
+            return <div style={s_wrap_results}>
                 <div style={{"display": "flex", "justifyContent": "space-between",
-                              "alignItems": "center", "marginBottom": "24px"}}>
+                              "alignItems": "flex-start", "marginBottom": "20px",
+                              "flexWrap": "wrap", "gap": "16px"}}>
                     <div>
-                        <h1 style={{"margin": "0 0 4px", "fontSize": "24px", "color": "var(--tx)",
-                                    "fontWeight": "700"}}>🍽️ Your Food Plan</h1>
+                        <h1 style={{"margin": "0 0 6px", "fontSize": "28px", "color": "var(--tx)",
+                                    "fontWeight": "700", "letterSpacing": "-0.5px"}}>Your Food Plan</h1>
                         <p style={{"margin": "0", "color": "var(--t2)", "fontSize": "14px"}}>
-                            📍 {location} · {radius} mi radius
+                            {"Personalized grocery + meal picks for your area"}
                         </p>
                     </div>
-                    <div style={{"display": "flex", "gap": "8px"}}>
+                    <div style={{"display": "flex", "gap": "10px", "flexWrap": "wrap"}}>
+                        <button onClick={lambda { form_step = 1; view = "form"; }}
+                            style={{"padding": "10px 18px", "background": "#2ecc71", "color": "white",
+                                    "border": "none", "borderRadius": "10px", "cursor": "pointer",
+                                    "fontSize": "14px", "fontWeight": "600"}}>
+                            Edit search
+                        </button>
                         <button onClick={lambda { form_step = 1; view = "form"; }} style={s_btn_ghost}>
-                            ← New Search
+                            New search
                         </button>
                         <button onClick={lambda { handle_logout(); }}
-                            style={{"padding": "8px 14px", "background": "none",
-                                    "border": "1px solid var(--bd)", "borderRadius": "8px",
+                            style={{"padding": "10px 14px", "background": "none",
+                                    "border": "1px solid var(--bd)", "borderRadius": "10px",
                                     "cursor": "pointer", "fontSize": "13px", "color": "var(--t3)"}}>
                             Logout
                         </button>
                     </div>
                 </div>
 
-                {summary and <div style={s_summary}>
-                    <p style={{"margin": "0", "color": "var(--gs)", "fontSize": "14px",
-                               "lineHeight": "1.6"}}>{summary}</p>
-                </div>}
+                <div style={{"background": "var(--cd)", "borderRadius": "14px", "padding": "18px 22px",
+                              "marginBottom": "18px", "boxShadow": "var(--sh)",
+                              "border": "1px solid var(--bd)"}}>
+                    <p style={{"margin": "0 0 10px", "fontSize": "11px", "fontWeight": "700",
+                               "color": "var(--t4)", "textTransform": "uppercase",
+                               "letterSpacing": "0.06em"}}>Search context</p>
+                    <div style={{"display": "flex", "flexWrap": "wrap", "gap": "10px 18px",
+                                  "fontSize": "14px", "color": "var(--t6)", "lineHeight": "1.5"}}>
+                        <span><strong style={{"color": "var(--tx)"}}>📍</strong> {location}</span>
+                        <span style={{"color": "var(--bd)"}}>|</span>
+                        <span><strong style={{"color": "var(--tx)"}}>Radius</strong> {radius} mi</span>
+                        <span style={{"color": "var(--bd)"}}>|</span>
+                        <span><strong style={{"color": "var(--tx)"}}>Budget</strong> ${budget}/meal</span>
+                        <span style={{"color": "var(--bd)"}}>|</span>
+                        <span><strong style={{"color": "var(--tx)"}}>Goal</strong> {" "}
+                            {_goal_display(selected_goal)}</span>
+                    </div>
+                    <div style={{"marginTop": "10px", "fontSize": "13px", "color": "var(--t5)"}}>
+                        <strong style={{"color": "var(--t6)"}}>Restrictions</strong>
+                        {" — "}
+                        {_join_short(allergies, ", ", 6)}
+                        {" · Diet: "}
+                        {_join_short(restrictions, ", ", 6)}
+                    </div>
+                </div>
 
-                {map_html and <div style={s_card}>
-                    <h3 style={{"margin": "0 0 12px", "fontSize": "15px", "color": "var(--t9)",
-                                "fontWeight": "700"}}>🗺️ Nearby Stores</h3>
-                    <iframe
-                        srcDoc={map_html}
-                        style={{"width": "100%", "height": "350px", "border": "none",
-                                "borderRadius": "8px"}}
-                    />
-                </div>}
+                <div style={{"background": "linear-gradient(135deg, var(--gb) 0%, var(--cd) 100%)",
+                              "borderRadius": "14px", "padding": "18px 22px", "marginBottom": "20px",
+                              "border": "1px solid var(--bd)", "boxShadow": "var(--sh)"}}>
+                    <div style={{"display": "flex", "flexWrap": "wrap", "alignItems": "center",
+                                  "gap": "12px 20px", "marginBottom": ("8px" if summary else "0")}}>
+                        <span style={{"display": "inline-flex", "alignItems": "center", "gap": "8px",
+                                      "background": "var(--cd)", "padding": "8px 14px",
+                                      "borderRadius": "999px", "fontSize": "14px",
+                                      "fontWeight": "600", "color": "var(--tx)",
+                                      "border": "1px solid var(--bd)"}}>
+                            <span style={{"color": "#2ecc71"}}>●</span>
+                            {str(len(stores))}{" stores"}
+                        </span>
+                        <span style={{"display": "inline-flex", "alignItems": "center", "gap": "8px",
+                                      "background": "var(--cd)", "padding": "8px 14px",
+                                      "borderRadius": "999px", "fontSize": "14px",
+                                      "fontWeight": "600", "color": "var(--tx)",
+                                      "border": "1px solid var(--bd)"}}>
+                            <span style={{"color": "#2ecc71"}}>●</span>
+                            {str(len(recipes))}{" recipes"}
+                        </span>
+                        {pick_cheapest_recipe(recipes) and <span style={{"fontSize": "14px",
+                            "color": "var(--t6)"}}>
+                            <strong style={{"color": "var(--tx)"}}>Best value:</strong>
+                            {" ~$"}{str(pick_cheapest_recipe(recipes).estimated_cost)}
+                            {" · "}{pick_cheapest_recipe(recipes).name}
+                        </span>}
+                        {pick_featured_store(stores, budget) and <span style={{"fontSize": "14px",
+                            "color": "var(--t6)"}}>
+                            <strong style={{"color": "var(--tx)"}}>Top store:</strong>
+                            {" "}{pick_featured_store(stores, budget).name}
+                        </span>}
+                    </div>
+                    {summary and <p style={{"margin": "0", "fontSize": "14px", "color": "var(--gs)",
+                               "lineHeight": "1.55"}}>{summary}</p>}
+                </div>
 
-                <div style={{"display": "flex", "borderBottom": "2px solid var(--dv)",
-                              "marginBottom": "24px"}}>
+                <div style={{"display": "grid",
+                              "gridTemplateColumns": "repeat(auto-fit, minmax(280px, 1fr))",
+                              "gap": "14px", "marginBottom": "26px"}}>
+                    {pick_featured_store(stores, budget) and <div style={{"background": "var(--cd)",
+                        "borderRadius": "14px", "padding": "18px 20px", "border": "1px solid var(--bd)",
+                        "boxShadow": "var(--sh)"}}>
+                        <p style={{"margin": "0 0 6px", "fontSize": "11px", "fontWeight": "700",
+                                   "color": "#2ecc71", "textTransform": "uppercase",
+                                   "letterSpacing": "0.05em"}}>Best store match</p>
+                        <p style={{"margin": "0 0 4px", "fontSize": "17px", "fontWeight": "700",
+                                   "color": "var(--tx)"}}>{pick_featured_store(stores, budget).name}</p>
+                        <p style={{"margin": "0 0 12px", "fontSize": "13px", "color": "var(--t2)"}}>
+                            {str(pick_featured_store(stores, budget).distance_miles)}{" mi · "}
+                            {store_badge_label(pick_featured_store(stores, budget), stores, budget)}
+                        </p>
+                        <button onClick={lambda {
+                            recipe_store_filter = pick_featured_store(stores, budget).name;
+                            active_tab = "recipes";
+                        }}
+                            style={{"width": "100%", "padding": "10px", "background": "none",
+                                    "border": "1px solid #2ecc71", "borderRadius": "10px",
+                                    "color": "#2ecc71", "fontWeight": "600", "cursor": "pointer",
+                                    "fontSize": "13px"}}>
+                            See recipes from this store
+                        </button>
+                    </div>}
+                    {pick_cheapest_recipe(recipes) and <div style={{"background": "var(--cd)",
+                        "borderRadius": "14px", "padding": "18px 20px", "border": "1px solid var(--bd)",
+                        "boxShadow": "var(--sh)"}}>
+                        <p style={{"margin": "0 0 6px", "fontSize": "11px", "fontWeight": "700",
+                                   "color": "#2ecc71", "textTransform": "uppercase",
+                                   "letterSpacing": "0.05em"}}>Best budget meal</p>
+                        <p style={{"margin": "0 0 4px", "fontSize": "17px", "fontWeight": "700",
+                                   "color": "var(--tx)"}}>{pick_cheapest_recipe(recipes).name}</p>
+                        <p style={{"margin": "0 0 12px", "fontSize": "13px", "color": "var(--t2)"}}>
+                            {"~$"}{str(pick_cheapest_recipe(recipes).estimated_cost)}
+                            {" per serving · "}{recipe_badge_label(pick_cheapest_recipe(recipes), recipes, budget)}
+                        </p>
+                        <button onClick={lambda {
+                            expanded_recipe = pick_cheapest_recipe(recipes).name;
+                            active_tab = "recipes";
+                        }}
+                            style={{"width": "100%", "padding": "10px", "background": "#2ecc71",
+                                    "border": "none", "borderRadius": "10px", "color": "white",
+                                    "fontWeight": "600", "cursor": "pointer", "fontSize": "13px"}}>
+                            View ingredients
+                        </button>
+                    </div>}
+                    {pick_highest_protein_recipe(recipes) and <div style={{"background": "var(--cd)",
+                        "borderRadius": "14px", "padding": "18px 20px", "border": "1px solid var(--bd)",
+                        "boxShadow": "var(--sh)"}}>
+                        <p style={{"margin": "0 0 6px", "fontSize": "11px", "fontWeight": "700",
+                                   "color": "#2ecc71", "textTransform": "uppercase",
+                                   "letterSpacing": "0.05em"}}>Highest protein</p>
+                        <p style={{"margin": "0 0 4px", "fontSize": "17px", "fontWeight": "700",
+                                   "color": "var(--tx)"}}>{pick_highest_protein_recipe(recipes).name}</p>
+                        <p style={{"margin": "0 0 12px", "fontSize": "13px", "color": "var(--t2)"}}>
+                            {str(_recipe_protein(pick_highest_protein_recipe(recipes)))}
+                            {"g protein · "}{recipe_badge_label(pick_highest_protein_recipe(recipes), recipes, budget)}
+                        </p>
+                        <button onClick={lambda {
+                            expanded_recipe = pick_highest_protein_recipe(recipes).name;
+                            active_tab = "recipes";
+                        }}
+                            style={{"width": "100%", "padding": "10px", "background": "none",
+                                    "border": "1px solid var(--bd)", "borderRadius": "10px",
+                                    "color": "var(--tx)", "fontWeight": "600", "cursor": "pointer",
+                                    "fontSize": "13px"}}>
+                            Cook this
+                        </button>
+                    </div>}
+                </div>
+
+                <div style={{"background": "var(--rw)", "borderRadius": "14px", "padding": "6px",
+                              "marginBottom": "16px", "display": "flex", "gap": "6px",
+                              "border": "1px solid var(--bd)"}}>
                     <button
                         onClick={lambda { active_tab = "stores"; }}
-                        style={{"padding": "12px 24px", "border": "none", "background": "none",
-                                "cursor": "pointer", "fontSize": "15px", "fontWeight": "600",
-                                "color": ("#2ecc71" if active_tab == "stores" else "var(--t3)"),
-                                "borderBottom": ("3px solid #2ecc71" if active_tab == "stores"
-                                                 else "3px solid transparent"),
-                                "marginBottom": "-2px"}}
+                        style={{"flex": "1", "padding": "12px 16px", "border": "none",
+                                "borderRadius": "10px", "cursor": "pointer", "fontSize": "15px",
+                                "fontWeight": "700",
+                                "background": ("#2ecc71" if active_tab == "stores" else "transparent"),
+                                "color": ("white" if active_tab == "stores" else "var(--t5)"),
+                                "boxShadow": ("0 2px 8px rgba(46,204,113,0.35)" if active_tab == "stores" else "none"),
+                                "transition": "all .15s ease"}}
                     >
-                        🏪 Stores ({str(len(stores))})
+                        {"🏪 Stores "}
+                        <span style={{"display": "inline-block", "marginLeft": "6px",
+                                      "padding": "2px 9px", "borderRadius": "999px",
+                                      "fontSize": "12px", "fontWeight": "800",
+                                      "background": ("rgba(255,255,255,0.25)" if active_tab == "stores" else "var(--dv)"),
+                                      "color": ("white" if active_tab == "stores" else "var(--t5)")}}>
+                            {str(len(stores))}
+                        </span>
                     </button>
                     <button
                         onClick={lambda { active_tab = "recipes"; }}
-                        style={{"padding": "12px 24px", "border": "none", "background": "none",
-                                "cursor": "pointer", "fontSize": "15px", "fontWeight": "600",
-                                "color": ("#2ecc71" if active_tab == "recipes" else "var(--t3)"),
-                                "borderBottom": ("3px solid #2ecc71" if active_tab == "recipes"
-                                                 else "3px solid transparent"),
-                                "marginBottom": "-2px"}}
+                        style={{"flex": "1", "padding": "12px 16px", "border": "none",
+                                "borderRadius": "10px", "cursor": "pointer", "fontSize": "15px",
+                                "fontWeight": "700",
+                                "background": ("#2ecc71" if active_tab == "recipes" else "transparent"),
+                                "color": ("white" if active_tab == "recipes" else "var(--t5)"),
+                                "boxShadow": ("0 2px 8px rgba(46,204,113,0.35)" if active_tab == "recipes" else "none"),
+                                "transition": "all .15s ease"}}
                     >
-                        👨‍🍳 Recipes ({str(len(recipes))})
+                        {"👨‍🍳 Recipes "}
+                        <span style={{"display": "inline-block", "marginLeft": "6px",
+                                      "padding": "2px 9px", "borderRadius": "999px",
+                                      "fontSize": "12px", "fontWeight": "800",
+                                      "background": ("rgba(255,255,255,0.25)" if active_tab == "recipes" else "var(--dv)"),
+                                      "color": ("white" if active_tab == "recipes" else "var(--t5)")}}>
+                            {str(len(recipes))}
+                        </span>
                     </button>
                 </div>
+
+                {active_tab == "stores" and <div style={{"display": "flex", "flexWrap": "wrap",
+                    "alignItems": "center", "gap": "12px", "marginBottom": "18px"}}>
+                    <label style={{"fontSize": "13px", "fontWeight": "600", "color": "var(--t5)"}}>
+                        Sort
+                    </label>
+                    <select
+                        value={store_sort_mode}
+                        onChange={lambda(e: Any) { store_sort_mode = e.target.value; }}
+                        style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid var(--bd)",
+                                "background": "var(--inp)", "color": "var(--tx)", "fontSize": "13px",
+                                "cursor": "pointer", "minWidth": "200px"}}
+                    >
+                        <option value="best_match">Best match</option>
+                        <option value="closest">Closest</option>
+                        <option value="cheapest_ingredients">Cheapest ingredients</option>
+                        <option value="most_items">Most items available</option>
+                    </select>
+                    <label style={{"display": "flex", "alignItems": "center", "gap": "8px",
+                                   "fontSize": "13px", "color": "var(--t5)", "cursor": "pointer"}}>
+                        <input
+                            type="checkbox"
+                            checked={store_open_only}
+                            onChange={lambda(e: Any) { store_open_only = e.target.checked; }}
+                        />
+                        Open now (estimated from hours)
+                    </label>
+                </div>}
+
+                {active_tab == "recipes" and <div>
+                    {recipe_store_filter and <div style={{"display": "flex", "justifyContent": "space-between",
+                        "alignItems": "center", "padding": "12px 16px", "marginBottom": "14px",
+                        "background": "var(--p2b)", "borderRadius": "12px", "border": "1px solid var(--bd)"}}>
+                        <span style={{"fontSize": "14px", "color": "var(--p2c)"}}>
+                            <strong>Filtered by store:</strong> {recipe_store_filter}
+                        </span>
+                        <button onClick={lambda { recipe_store_filter = ""; }}
+                            style={{"background": "none", "border": "none", "color": "var(--p2c)",
+                                    "cursor": "pointer", "fontWeight": "700", "fontSize": "13px"}}>
+                            Clear
+                        </button>
+                    </div>}
+                    <div style={{"display": "flex", "flexWrap": "wrap",
+                                  "alignItems": "center", "gap": "12px", "marginBottom": "18px"}}>
+                        <label style={{"fontSize": "13px", "fontWeight": "600", "color": "var(--t5)"}}>
+                            Sort
+                        </label>
+                        <select
+                            value={recipe_sort_mode}
+                            onChange={lambda(e: Any) { recipe_sort_mode = e.target.value; }}
+                            style={{"padding": "8px 12px", "borderRadius": "10px", "border": "1px solid var(--bd)",
+                                    "background": "var(--inp)", "color": "var(--tx)", "fontSize": "13px",
+                                    "cursor": "pointer", "minWidth": "200px"}}
+                        >
+                            <option value="best_match">Best match</option>
+                            <option value="cheapest">Cheapest</option>
+                            <option value="highest_protein">Highest protein</option>
+                            <option value="lowest_calories">Lowest calories</option>
+                            <option value="quickest">Quickest</option>
+                            <option value="budget_fit">Best budget fit</option>
+                        </select>
+                        <button onClick={lambda { show_recipe_tags = not show_recipe_tags; }}
+                            style={{"padding": "8px 12px", "borderRadius": "10px",
+                                    "border": "1px solid var(--bd)", "background": "var(--inp)",
+                                    "color": "var(--tx)", "fontSize": "13px", "cursor": "pointer"}}>
+                            {("Hide tags" if show_recipe_tags else "Show all tags")}
+                        </button>
+                    </div>
+                </div>}
 
                 {active_tab == "stores" and <div>
                     {not stores and
                      <p style={{"color": "var(--t4)", "textAlign": "center", "padding": "40px 0"}}>
                          No stores found. Try increasing your radius.
                      </p>}
-                    {[<div key={s.address} style={s_card}>
+                    <div style={s_grid_results}>
+                    {[<div key={_store_key(s)} style={{"background": "var(--cd)", "borderRadius": "14px",
+                        "padding": "22px", "marginBottom": "0", "boxShadow": "var(--sh)",
+                        "border": "1px solid var(--bd)"}}>
                         <div style={{"display": "flex", "justifyContent": "space-between",
-                                      "alignItems": "flex-start", "marginBottom": "12px"}}>
-                            <div>
-                                <h3 style={{"margin": "0 0 4px", "fontSize": "17px",
-                                           "color": "var(--tx)"}}>{s.name}</h3>
-                                <p style={{"margin": "0 0 2px", "color": "var(--ta)",
-                                           "fontSize": "13px"}}>📍 {s.address}</p>
+                            "alignItems": "flex-start", "gap": "14px", "marginBottom": "10px"}}>
+                            <div style={{"flex": "1", "minWidth": "0"}}>
+                                <h3 style={{"margin": "0 0 6px", "fontSize": "20px",
+                                    "color": "var(--tx)", "fontWeight": "800"}}>{s.name}</h3>
+                                <span style={{"display": "inline-block", "marginBottom": "8px",
+                                    "padding": "4px 10px", "borderRadius": "8px", "fontSize": "12px",
+                                    "fontWeight": "700", "background": "var(--gb)", "color": "var(--gs)"}}>
+                                    {store_badge_label(s, stores, budget)}
+                                </span>
+                                <p style={{"margin": "0 0 4px", "fontSize": "13px", "color": "var(--t2)"}}>
+                                    <strong style={{"color": "var(--t6)"}}>Status:</strong>
+                                    {" "}{("Likely open" if _guess_store_open(s) else "May be closed — verify")}
+                                </p>
+                                <p style={{"margin": "0", "fontSize": "14px", "color": "var(--ta)",
+                                    "lineHeight": "1.45"}}>📍 {s.address}</p>
                                 {s.hours and
-                                 <p style={{"margin": "0", "color": "var(--t3)", "fontSize": "12px"}}>
+                                 <p style={{"margin": "6px 0 0", "color": "var(--t3)", "fontSize": "12px"}}>
                                      🕐 {s.hours}
                                  </p>}
                             </div>
-                            <div style={{"textAlign": "right", "flexShrink": "0",
-                                         "marginLeft": "12px"}}>
-                                <span style={s_dist_pill}>{str(s.distance_miles)} mi</span>
-                                <span style={{"color": "var(--t4)", "fontSize": "12px"}}>{s.store_type}</span>
+                            <div style={{"textAlign": "right", "flexShrink": "0"}}>
+                                <span style={{"background": "#2ecc71", "color": "white",
+                                    "borderRadius": "12px", "padding": "6px 12px", "fontSize": "15px",
+                                    "fontWeight": "800", "display": "inline-block"}}>
+                                    {str(s.distance_miles)}{" mi"}
+                                </span>
+                                <p style={{"margin": "8px 0 0", "fontSize": "12px", "color": "var(--t4)"}}>
+                                    {s.store_type}
+                                </p>
+                            </div>
+                        </div>
+                        <div style={{"display": "grid",
+                            "gridTemplateColumns": "repeat(auto-fit, minmax(140px, 1fr))",
+                            "gap": "10px", "marginBottom": "14px", "padding": "12px",
+                            "background": "var(--rw)", "borderRadius": "12px"}}>
+                            <div>
+                                <p style={{"margin": "0", "fontSize": "11px", "color": "var(--t4)",
+                                    "fontWeight": "600"}}>Est. basket</p>
+                                <p style={{"margin": "4px 0 0", "fontSize": "16px", "fontWeight": "700",
+                                    "color": "var(--gt)"}}>
+                                    {"$" + str(_store_basket_est(s))}
+                                </p>
+                            </div>
+                            <div>
+                                <p style={{"margin": "0", "fontSize": "11px", "color": "var(--t4)",
+                                    "fontWeight": "600"}}>Ingredient match</p>
+                                <p style={{"margin": "4px 0 0", "fontSize": "16px", "fontWeight": "700",
+                                    "color": "var(--tx)"}}>
+                                    {str(min(100, 20 + _store_item_count(s) * 8))}{"%"}
+                                </p>
+                            </div>
+                            <div>
+                                <p style={{"margin": "0", "fontSize": "11px", "color": "var(--t4)",
+                                    "fontWeight": "600"}}>Linked meals</p>
+                                <p style={{"margin": "4px 0 0", "fontSize": "16px", "fontWeight": "700",
+                                    "color": "var(--tx)"}}>
+                                    {str(count_recipes_for_store(s.name, recipes))}
+                                </p>
                             </div>
                         </div>
                         {s.items and <div>
-                            <p style={{"margin": "0 0 8px", "fontSize": "13px",
-                                       "fontWeight": "600", "color": "var(--t8)",
-                                       "borderTop": "1px solid var(--bf)",
-                                       "paddingTop": "12px"}}>
-                                Available Items
+                            <p style={{"margin": "0 0 10px", "fontSize": "13px", "fontWeight": "700",
+                                "color": "var(--t8)"}}>
+                                Sample items
+                                {" ("}{str(len(s.items))}{" total)"}
                             </p>
-                            <div style={{"display": "grid", "gap": "6px"}}>
-                                {[<div key={item.name} style={s_item_row}>
-                                    <div>
-                                        <span style={{"fontSize": "14px", "fontWeight": "500",
-                                                      "color": "var(--t6)"}}>{item.name}</span>
-                                        <span style={{"marginLeft": "8px", "fontSize": "11px",
-                                                      "color": "var(--t3)", "background": "var(--be)",
-                                                      "padding": "2px 7px",
-                                                      "borderRadius": "10px"}}>
-                                            {item.category}
-                                        </span>
-                                        {item.notes and
-                                         <span style={{"marginLeft": "6px", "fontSize": "11px",
-                                                       "color": "var(--t4)"}}>{item.notes}</span>}
-                                    </div>
-                                    <span style={s_price_grn}>
-                                        {"$" + str(item.estimated_price) + "/" + item.unit}
+                            <div style={{"display": "grid",
+                                "gridTemplateColumns": "repeat(auto-fill, minmax(240px, 1fr))",
+                                "gap": "8px"}}>
+                                {[<div key={item.name} style={{"display": "flex",
+                                    "justifyContent": "space-between", "alignItems": "center",
+                                    "padding": "10px 12px", "background": "var(--cd)",
+                                    "borderRadius": "10px", "border": "1px solid var(--be)"}}>
+                                    <span style={{"fontSize": "14px", "fontWeight": "500",
+                                        "color": "var(--t6)"}}>{item.name}</span>
+                                    <span style={{"color": "var(--gt)", "fontWeight": "700",
+                                        "fontSize": "14px"}}>
+                                        {"$" + str(item.estimated_price)}
                                     </span>
-                                </div> for item in s.items]}
+                                </div> for item in items_preview(s.items, expanded_store_key == _store_key(s))]}
                             </div>
+                            {len(s.items) > 4 and <button
+                                onClick={lambda {
+                                    expanded_store_key = ("" if expanded_store_key == _store_key(s) else _store_key(s));
+                                }}
+                                style={{"marginTop": "10px", "width": "100%", "padding": "10px",
+                                    "background": "none", "border": "1px dashed var(--bd)",
+                                    "borderRadius": "10px", "cursor": "pointer", "fontSize": "13px",
+                                    "color": "var(--t5)", "fontWeight": "600"}}>
+                                {("Collapse items" if expanded_store_key == _store_key(s) else "Show all " + str(len(s.items)) + " items")}
+                            </button>}
                         </div>}
-                    </div> for s in stores]}
+                        <div style={{"display": "flex", "flexWrap": "wrap", "gap": "10px",
+                            "marginTop": "14px"}}>
+                            <button onClick={lambda {
+                                recipe_store_filter = s.name;
+                                active_tab = "recipes";
+                            }}
+                                style={{"flex": "1", "minWidth": "140px", "padding": "12px",
+                                    "background": "#2ecc71", "color": "white", "border": "none",
+                                    "borderRadius": "10px", "fontWeight": "700", "cursor": "pointer",
+                                    "fontSize": "13px"}}>
+                                See recipes from this store
+                            </button>
+                            <button onClick={lambda { active_tab = "recipes"; recipe_sort_mode = "cheapest"; }}
+                                style={{"padding": "12px 14px", "background": "none",
+                                    "border": "1px solid var(--bd)", "borderRadius": "10px",
+                                    "cursor": "pointer", "fontSize": "13px", "color": "var(--t5)"}}>
+                                View budget meals
+                            </button>
+                        </div>
+                    </div> for s in sort_stores_list(stores, store_sort_mode, store_open_only, budget)]}
+                    </div>
                 </div>}
 
                 {active_tab == "recipes" and <div>
@@ -1430,94 +2163,162 @@ cl {
                      <p style={{"color": "var(--t4)", "textAlign": "center", "padding": "40px 0"}}>
                          No recipes found.
                      </p>}
-                    {[<div key={r.name} style={s_card}>
+                    <div style={s_grid_results}>
+                    {[<div key={r.name} style={{"background": "var(--cd)", "borderRadius": "14px",
+                        "padding": "22px", "boxShadow": "var(--sh)",
+                        "border": ("2px solid #2ecc71" if recipe_store_filter and recipe_matches_store_filter(r, recipe_store_filter) else "1px solid var(--bd)")}}>
                         <div style={{"display": "flex", "justifyContent": "space-between",
-                                      "alignItems": "flex-start", "marginBottom": "10px"}}>
-                            <div style={{"flex": "1"}}>
-                                <h3 style={{"margin": "0 0 4px", "fontSize": "18px",
-                                           "color": "var(--tx)"}}>{r.name}</h3>
-                                <p style={{"margin": "0", "color": "var(--t2)", "fontSize": "14px",
-                                           "lineHeight": "1.4"}}>{r.description}</p>
-                            </div>
-                            <span style={s_cost_pill}>{"$" + str(r.estimated_cost)}</span>
+                            "alignItems": "flex-start", "gap": "14px", "marginBottom": "8px"}}>
+                            <span style={{"display": "inline-block", "padding": "4px 10px",
+                                "borderRadius": "8px", "fontSize": "11px", "fontWeight": "800",
+                                "background": "var(--gb)", "color": "var(--gs)", "textTransform": "uppercase",
+                                "letterSpacing": "0.04em"}}>
+                                {recipe_badge_label(r, recipes, budget)}
+                            </span>
+                            <span style={{"background": "var(--gb)", "color": "var(--gt)",
+                                "borderRadius": "14px", "padding": "8px 16px", "fontSize": "18px",
+                                "fontWeight": "800", "whiteSpace": "nowrap"}}>
+                                {"$" + str(r.estimated_cost)}
+                            </span>
                         </div>
+                        <h3 style={{"margin": "0 0 8px", "fontSize": "21px", "color": "var(--tx)",
+                            "fontWeight": "800", "lineHeight": "1.2"}}>{r.name}</h3>
+                        <p style={{"margin": "0 0 12px", "color": "var(--t2)", "fontSize": "15px",
+                            "lineHeight": "1.5"}}>{r.description}</p>
+                        <p style={{"margin": "0 0 14px", "fontSize": "13px", "color": "var(--t5)"}}>
+                            <strong style={{"color": "var(--t6)"}}>Sourcing:</strong>
+                            {" Available at "}{str(count_unique_stores_in_recipe(r))}{" nearby stores"}
+                            {primary_store_for_recipe(r) and <span>
+                                {" · Most items from "}<strong style={{"color": "var(--tx)"}}>
+                                    {primary_store_for_recipe(r)}</strong>
+                            </span>}
+                        </p>
 
                         {r.macros_per_serving and
-                         <div style={{"display": "flex", "flexWrap": "wrap", "gap": "6px",
-                                       "marginBottom": "10px"}}>
-                            <span style={s_pill_cal}>
-                                🔥 {str(r.macros_per_serving.calories)} kcal
-                            </span>
-                            <span style={s_pill_pro}>
-                                💪 {str(r.macros_per_serving.protein_g)}g protein
-                            </span>
-                            <span style={s_pill_carb}>
-                                🌾 {str(r.macros_per_serving.carbs_g)}g carbs
-                            </span>
-                            <span style={s_pill_fat}>
-                                🥑 {str(r.macros_per_serving.fat_g)}g fat
-                            </span>
-                         </div>}
-
-                        <div style={{"display": "flex", "gap": "16px", "fontSize": "13px",
-                                      "color": "var(--t2)", "marginBottom": "10px",
-                                      "flexWrap": "wrap"}}>
-                            <span>⏱ {str(r.prep_time_mins)}m prep</span>
-                            <span>🔥 {str(r.cook_time_mins)}m cook</span>
-                            <span>🍽 {str(r.servings)} serving(s)</span>
-                            {r.macro_deviation_pct is not None and
-                             <span>📊 {str(r.macro_deviation_pct)}% macro dev</span>}
-                            {r.budget_deviation_pct is not None and
-                             <span>💵 {str(r.budget_deviation_pct)}% budget dev</span>}
-                        </div>
-
-                        {r.tags and <div style={{"marginBottom": "12px"}}>
-                            {[<span key={t} style={s_tag_grey}>{t}</span> for t in r.tags]}
+                        <div style={{"display": "grid",
+                            "gridTemplateColumns": "repeat(auto-fit, minmax(72px, 1fr))",
+                            "gap": "8px", "marginBottom": "12px", "padding": "12px",
+                            "background": "var(--rw)", "borderRadius": "12px",
+                            "border": "1px solid var(--be)"}}>
+                            <div style={{"textAlign": "center"}}>
+                                <p style={{"margin": "0", "fontSize": "10px", "color": "var(--t4)",
+                                    "fontWeight": "700"}}>Cal</p>
+                                <p style={{"margin": "4px 0 0", "fontSize": "15px", "fontWeight": "800",
+                                    "color": "var(--tx)"}}>{str(r.macros_per_serving.calories)}</p>
+                            </div>
+                            <div style={{"textAlign": "center"}}>
+                                <p style={{"margin": "0", "fontSize": "10px", "color": "var(--t4)",
+                                    "fontWeight": "700"}}>Protein</p>
+                                <p style={{"margin": "4px 0 0", "fontSize": "15px", "fontWeight": "800",
+                                    "color": "var(--tx)"}}>{str(r.macros_per_serving.protein_g)}g</p>
+                            </div>
+                            <div style={{"textAlign": "center"}}>
+                                <p style={{"margin": "0", "fontSize": "10px", "color": "var(--t4)",
+                                    "fontWeight": "700"}}>Carbs</p>
+                                <p style={{"margin": "4px 0 0", "fontSize": "15px", "fontWeight": "800",
+                                    "color": "var(--tx)"}}>{str(r.macros_per_serving.carbs_g)}g</p>
+                            </div>
+                            <div style={{"textAlign": "center"}}>
+                                <p style={{"margin": "0", "fontSize": "10px", "color": "var(--t4)",
+                                    "fontWeight": "700"}}>Fat</p>
+                                <p style={{"margin": "4px 0 0", "fontSize": "15px", "fontWeight": "800",
+                                    "color": "var(--tx)"}}>{str(r.macros_per_serving.fat_g)}g</p>
+                            </div>
+                            <div style={{"textAlign": "center"}}>
+                                <p style={{"margin": "0", "fontSize": "10px", "color": "var(--t4)",
+                                    "fontWeight": "700"}}>Time</p>
+                                <p style={{"margin": "4px 0 0", "fontSize": "15px", "fontWeight": "800",
+                                    "color": "var(--tx)"}}>{str(_recipe_time(r))}{"m"}</p>
+                            </div>
                         </div>}
 
-                        <button
-                            onClick={lambda {
-                                expanded_recipe = ("" if expanded_recipe == r.name
-                                                   else r.name);
-                            }}
-                            style={s_btn_expand}
-                        >
-                            {("▲ Hide Details" if expanded_recipe == r.name
-                              else "▼ Ingredients & Instructions")}
-                        </button>
+                        {r.tags and tags_preview(r.tags, show_recipe_tags) and <div style={{"marginBottom": "12px"}}>
+                            {[<span key={t} style={{"display": "inline-block",
+                                "background": "var(--dv)", "color": "var(--t5)", "borderRadius": "8px",
+                                "padding": "3px 10px", "fontSize": "12px", "marginRight": "6px",
+                                "marginBottom": "4px"}}>{t}</span>
+                                for t in tags_preview(r.tags, show_recipe_tags)]}
+                            {(not show_recipe_tags and len(r.tags) > 2) and <span style={{"fontSize": "12px",
+                                "color": "var(--t4)"}}>+{str(len(r.tags) - 2)} tags</span>}
+                        </div>}
 
-                        {expanded_recipe == r.name and <div style={{"marginTop": "16px"}}>
+                        <div style={{"display": "flex", "flexWrap": "wrap", "gap": "10px"}}>
+                            <button onClick={lambda {
+                                expanded_recipe = ("" if expanded_recipe == r.name else r.name);
+                            }}
+                                style={{"flex": "1", "minWidth": "140px", "padding": "12px",
+                                    "background": "#2ecc71", "color": "white", "border": "none",
+                                    "borderRadius": "10px", "fontWeight": "700", "cursor": "pointer",
+                                    "fontSize": "13px"}}>
+                                {("Hide ingredients" if expanded_recipe == r.name else "View ingredients")}
+                            </button>
+                            <button onClick={lambda {
+                                expanded_recipe = r.name;
+                            }}
+                                style={{"padding": "12px 16px", "background": "none",
+                                    "border": "1px solid var(--bd)", "borderRadius": "10px",
+                                    "cursor": "pointer", "fontSize": "13px", "fontWeight": "600",
+                                    "color": "var(--tx)"}}>
+                                Cook this
+                            </button>
+                            <button onClick={lambda { active_tab = "stores"; }}
+                                style={{"padding": "12px 16px", "background": "none",
+                                    "border": "1px solid var(--bd)", "borderRadius": "10px",
+                                    "cursor": "pointer", "fontSize": "13px", "color": "var(--t5)"}}>
+                                See nearby stores
+                            </button>
+                        </div>
+
+                        {expanded_recipe == r.name and <div style={{"marginTop": "18px",
+                            "paddingTop": "16px", "borderTop": "1px solid var(--bf)"}}>
                             <p style={{"fontWeight": "700", "fontSize": "14px",
-                                       "marginBottom": "10px", "color": "var(--t6)"}}>
-                                🛒 Ingredients
-                            </p>
-                            <div style={{"marginBottom": "16px"}}>
-                                {[<div key={ing.item} style={s_ing_row}>
+                                "marginBottom": "10px", "color": "var(--t6)"}}>Ingredients</p>
+                            <div style={{"display": "grid",
+                                "gridTemplateColumns": "repeat(auto-fill, minmax(260px, 1fr))",
+                                "gap": "0", "marginBottom": "16px"}}>
+                                {[<div key={ing.item} style={{"display": "flex",
+                                    "justifyContent": "space-between", "alignItems": "center",
+                                    "padding": "10px 0", "borderBottom": "1px solid var(--bf)",
+                                    "fontSize": "14px"}}>
                                     <div>
-                                        <span style={{"fontWeight": "500"}}>{ing.quantity}</span>
-                                        <span style={{"marginLeft": "6px",
-                                                      "color": "var(--t7)"}}>{ing.item}</span>
+                                        <span style={{"fontWeight": "600"}}>{ing.quantity}</span>
+                                        <span style={{"marginLeft": "8px", "color": "var(--t7)"}}>
+                                            {ing.item}</span>
                                         <span style={{"marginLeft": "8px", "fontSize": "12px",
-                                                      "color": "var(--t3)"}}>@ {ing.store}</span>
+                                            "color": "var(--t3)"}}>@ {ing.store}</span>
                                     </div>
-                                    <span style={{"color": "var(--gt)", "fontWeight": "600"}}>
+                                    <span style={{"color": "var(--gt)", "fontWeight": "700"}}>
                                         {"$" + str(ing.estimated_price)}
                                     </span>
                                 </div> for ing in r.ingredients]}
                             </div>
                             <p style={{"fontWeight": "700", "fontSize": "14px",
-                                       "marginBottom": "10px", "color": "var(--t6)"}}>
-                                👨‍🍳 Instructions
-                            </p>
+                                "marginBottom": "10px", "color": "var(--t6)"}}>Instructions</p>
                             <ol style={{"paddingLeft": "20px", "margin": "0"}}>
-                                {[<li key={step}
-                                      style={{"marginBottom": "8px", "fontSize": "14px",
-                                              "color": "var(--t7)", "lineHeight": "1.5"}}>
+                                {[<li key={step} style={{"marginBottom": "8px", "fontSize": "14px",
+                                    "color": "var(--t7)", "lineHeight": "1.5"}}>
                                     {step}
                                 </li> for step in r.instructions]}
                             </ol>
                         </div>}
-                    </div> for r in recipes]}
+                    </div> for r in sort_recipes_list(filter_recipes_list(recipes, recipe_store_filter), recipe_sort_mode, budget)]}
+                    </div>
+                </div>}
+
+                {map_html and <div style={{"background": "var(--cd)", "borderRadius": "14px",
+                    "padding": "18px 20px", "marginTop": "28px", "boxShadow": "var(--sh)",
+                    "border": "1px solid var(--bd)"}}>
+                    <div style={{"display": "flex", "justifyContent": "space-between",
+                        "alignItems": "center", "marginBottom": "12px"}}>
+                        <h3 style={{"margin": "0", "fontSize": "15px", "color": "var(--t9)",
+                            "fontWeight": "700"}}>Area map</h3>
+                        <span style={{"fontSize": "12px", "color": "var(--t4)"}}>Supporting context</span>
+                    </div>
+                    <iframe
+                        srcDoc={map_html}
+                        style={{"width": "100%", "height": "260px", "border": "none",
+                            "borderRadius": "10px"}}
+                    />
                 </div>}
             </div>;
         }
